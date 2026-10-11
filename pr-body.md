@@ -3,217 +3,239 @@
 No issue. Only a person can create an issue in this repository, and no person
 has created one for this defect. I did not find the PRD or the MVP plan in the
 repository, so I cannot link a section. This PR adds no feature. It corrects
-how the feed fetch that is already in `plugins/plugin-calendar` decodes the
-body of a subscribed calendar.
+how the unsubscribe service that is already in `plugins/plugin-inbox` reads a
+`mailto` unsubscribe target.
 
 # Change
 
-The synchronization of a subscribed calendar (ICS feed) failed for the full
-feed when one line fold was inside a character that is not ASCII.
+When the owner unsubscribed from a mailing list by email, the assistant sent
+an unsubscribe email with a damaged token or with no token, and it recorded
+the result as `succeeded`.
 
-An ICS file has long lines in parts: a line break and one space show that the
-line continues. This is a fold. RFC 5545 section 3.1 counts the length of a
-line in octets (bytes), not in characters. A character such as `ü`, `분`, or
-an emoji has 2 to 4 octets in UTF-8. Thus a producer that folds at 75 octets
-can put the fold between the octets of one character. The RFC has a note for
-this case: it says that simple implementations make such folds, and that a
-reader must unfold the lines in a way that gives the original octets again.
+A newsletter gives its unsubscribe target in the header `List-Unsubscribe`.
+One form of the target is a `mailto` URI with a subject or a body, for example
+`<mailto:leave@lists.example.com?subject=unsubscribe%20a1B2+c3D4>`. The list
+server reads the subject or the body to find the subscriber. The text is
+frequently a token.
 
-The fetch decoded the body as UTF-8 first, and the parser removed the folds
-after that. A body with a fold inside a character is not valid UTF-8 before
-the folds are removed. Thus the fetch stopped with the error
-`ICS_FEED_INVALID_UTF8`, and no event of the feed was in the calendar. A feed
-with German, Korean, or emoji text in a long title can have this result.
+The service read the subject and the body with `URLSearchParams`. That class
+is for HTML form data. It has two rules that are not correct for a `mailto`
+URI:
 
-This PR moves a fold that is inside a UTF-8 character to the end of that
-character before the body is decoded.
+- It reads `+` as a space. In a `mailto` URI, `+` is the character `+`. A
+  token such as `a1B2+c3D4` was sent as `a1B2 c3D4`.
+- It finds a field only when the name has small letters (`subject`). A
+  `mailto` field name can have capital letters (`Subject`). The service did
+  not find such a field, and it sent the default text `unsubscribe` with no
+  token.
 
-Before (base `4da33e0cd1`):
+In the two cases, the list server cannot find the subscriber, so the owner
+stays on the list. The record says `succeeded`.
+
+This PR keeps `+` and finds a field name in all letter cases.
+
+Before (base `6b83a01fcf`):
 
 ```
-Feed folded at 75 octets (folds inside characters)
-  body: 780 octets, folds inside a character: 3
-  synchronization: threw ICS_FEED_INVALID_UTF8: Calendar feed body is not valid UTF-8.
-  events in the feed: 0
-    not stored: AA Jahresabschlussgespräch der Geschäftsführung: Prüfung der Bücher für Köln, Düsseldorf und München
-    not stored: 분기 실적 검토 회의와 다음 분기 계획 수립을 위한 전체 팀 워크숍 및 저녁 식사 모임 안내
-    not stored: Offsite kickoff with dinner and a walk on the beach, last session🎉🎉 see you there
+A token with '+' in the subject
+  List-Unsubscribe: <mailto:unsubscribe@lists.example.com?subject=unsubscribe%20a1B2+c3D4/e5==>
+  record: method=mailto status=succeeded
+  expected email: {"recipient":"unsubscribe@lists.example.com","subject":"unsubscribe a1B2+c3D4/e5==","body":null}
+  email sent:     {"recipient":"unsubscribe@lists.example.com","subject":"unsubscribe a1B2 c3D4/e5==","body":null}
+  agrees: no
+
+Field names with capital letters
+  List-Unsubscribe: <mailto:requests@lists.example.com?Subject=unsubscribe%20list-42&Body=stop>
+  record: method=mailto status=succeeded
+  expected email: {"recipient":"requests@lists.example.com","subject":"unsubscribe list-42","body":"stop"}
+  email sent:     {"recipient":"requests@lists.example.com","subject":null,"body":null}
+  agrees: no
 ```
 
 After (this PR):
 
 ```
-Feed folded at 75 octets (folds inside characters)
-  body: 780 octets, folds inside a character: 3
-  synchronization: outcome=complete source status=fresh error=none
-  events in the feed: 3
-    stored with the exact title: AA Jahresabschlussgespräch der Geschäftsführung: Prüfung der Bücher für Köln, Düsseldorf und München
-    stored with the exact title: 분기 실적 검토 회의와 다음 분기 계획 수립을 위한 전체 팀 워크숍 및 저녁 식사 모임 안내
-    stored with the exact title: Offsite kickoff with dinner and a walk on the beach, last session🎉🎉 see you there
+A token with '+' in the subject
+  List-Unsubscribe: <mailto:unsubscribe@lists.example.com?subject=unsubscribe%20a1B2+c3D4/e5==>
+  record: method=mailto status=succeeded
+  expected email: {"recipient":"unsubscribe@lists.example.com","subject":"unsubscribe a1B2+c3D4/e5==","body":null}
+  email sent:     {"recipient":"unsubscribe@lists.example.com","subject":"unsubscribe a1B2+c3D4/e5==","body":null}
+  agrees: yes
+
+Field names with capital letters
+  List-Unsubscribe: <mailto:requests@lists.example.com?Subject=unsubscribe%20list-42&Body=stop>
+  record: method=mailto status=succeeded
+  expected email: {"recipient":"requests@lists.example.com","subject":"unsubscribe list-42","body":"stop"}
+  email sent:     {"recipient":"requests@lists.example.com","subject":"unsubscribe list-42","body":"stop"}
+  agrees: yes
 ```
 
-The backend log row has the two control feeds.
+The backend log row has all five targets.
 
 # Why this implementation
 
 Sources that I used:
 
-- RFC 5545 section 3.1, Content Lines
-  (https://www.rfc-editor.org/rfc/rfc5545#section-3.1). It gives the limit of
-  75 octets for a line, and it has the note about a fold in the middle of a
-  UTF-8 multi-octet sequence.
-- KDE bug 271859, "vCard logical lines folded in the middle of utf-8
-  character" (https://bugs.kde.org/show_bug.cgi?id=271859). KAddressBook
-  folded lines at the octet and cut Cyrillic characters. The correction is in
-  version 4.13. This is a vCard file, which has the same folding rule. It
-  shows that a product did write such folds.
-- SOGo bug 2298 (https://bugs.sogo.nu/view.php?id=2298). A user gave SOGo an
-  ICS file with a fold inside an umlaut, and SOGo refused the file. The
-  report says that SOGo decodes UTF-8 before it unfolds. This is the same
-  defect in a different product.
+- RFC 6068, the `mailto` URI scheme (https://www.rfc-editor.org/rfc/rfc6068).
+  - Section 2 has the grammar. `+` is in `some-delims`, so a field value can
+    have a literal `+`. The same section says that a field name (`hfname`) is
+    case-insensitive.
+  - Section 5 says that a `+` that stands for a space cannot be told from a
+    real `+`, that a producer SHOULD write a space as `%20`, and that a
+    producer MAY write `+` as `%2B`. Thus a literal `+` is the character `+`.
+- RFC 2369 defines `List-Unsubscribe` and its `mailto` form.
 
 Decisions:
 
-- **The fetch moves the fold. It does not remove it.** The octets
-  `C3 CR LF SP BC` become `C3 BC CR LF SP`. The decoded text is the same text
-  with the fold one character later. The parser then removes the fold as
-  before, and its limits for the number of lines and for the line length see
-  the same lines.
-- **The change is in the fetch**, because that is where the octets become
-  text. The parser gets a string and cannot repair the octets.
-- **The fetch now decodes the body one time, after it has read all of it.**
-  Before, it decoded each part of the stream. A fold can be between two parts
-  of the stream, so the repair needs the full body. The size limit of 5 MB
-  and its check during the read are the same as before.
-- **A body that is not UTF-8 is an error as before.** The repair moves octets
-  only when a fold is directly between the octets of one sequence and the
-  necessary continuation octets follow the fold. The replay has a control
-  with an octet `0xFF`.
+- **The code keeps `URLSearchParams` and protects `+` first.** It changes
+  each `+` into `%2B` before the parse. All other decoding stays the same as
+  before, also for a value that has a `%` with no hexadecimal digits.
+- **The field name is compared in small letters.** The first field with the
+  name is used, as before.
+- **I did not change the address part.** It already keeps `+`
+  (`unsub+token@lists.example.com`). The replay has this as a control.
 
 Alternatives that I examined:
 
-- Decode with replacement characters and not with an error. I did not do
-  this. It puts wrong characters in titles and hides a body that is not
-  UTF-8.
-- Remove all folds in the fetch before the decode. I did not do this. The
-  parser owns the unfold step and its limits, and two places with the same
-  step can disagree.
+- Decode each field with `decodeURIComponent`. I did not do this. It throws
+  an error for a value such as `100%`, which `URLSearchParams` accepts. That
+  changes a request that works now into a failure.
 
 # Testing
 
-All commands ran on the tree of commit `7ff26edd52aa8ef537183163556423cb8f15291a`
+All commands ran on the tree of commit `684a65ec88f84bf1540da702b574360b252d2d35`
 with Bun 1.4.2 and Node 24.15.0 on Linux x64.
 
 - **Real service path, before and after.** A script used the same setup as
-  `calendar-ics-source.pglite.test.ts`: the real `CalendarService`, the real
-  PGlite tables from the production schema, and a feed body given as octets
-  through the transport parameter of `syncIcsCalendarSource`. It
-  synchronized three feeds and read each with `getCalendarFeed`:
-  1. A feed that is folded at 75 octets. Its three titles have a fold inside
-     a character of 2 octets (`ü`), of 3 octets (Korean), and of 4 octets
-     (emoji).
-  2. Control: the same feed folded between characters. It is correct before
-     and after.
-  3. Control: a body with the octet `0xFF`. It is an error before and after.
-  Results are in **Change** and in the backend log row.
-- `bun run test` in `plugins/plugin-calendar`: 32 files passed, 2 skipped;
-  375 tests passed, 4 skipped.
-- `bun run typecheck` in `plugins/plugin-calendar`: passed.
-- `bun run lint:check` in `plugins/plugin-calendar`: passed.
-- I added one test case to the existing file
-  `calendar-ics-source.pglite.test.ts`. It gives the real service a body in
-  which a fold is after the first octet of `ü`, and it compares the stored
-  title. It fails on the base commit (the synchronization throws) and passes
-  on this branch. I added no test file.
+  `inbox.real-db.test.ts`: a real runtime with a real PGlite database and the
+  real `InboxUnsubscribeService`. The Gmail gateway is a double, as in that
+  test file, because it is the network boundary. For each of five
+  `List-Unsubscribe` values, the script called `unsubscribeEmailSender` and
+  printed the email that the service gave to the gateway
+  (`sendMailtoUnsubscribeEmail`) and the stored record. Two values are
+  controls: `+` written as `%2B`, and `+` in the address. Their results are
+  the same before and after. Results are in **Change** and in the backend log
+  row.
+- `bun run test` in `plugins/plugin-inbox`: 13 files passed, 1 skipped;
+  81 tests passed, 2 skipped.
+- `bun run typecheck` in `plugins/plugin-inbox`: passed.
+- `bun run lint:check` in `plugins/plugin-inbox`: passed.
+- I added one test case to the existing file `inbox.real-db.test.ts`. It uses
+  the real service and database and compares the email that the gateway
+  gets. It fails on the base commit and passes on this branch. I added no
+  test file.
 
 ## How to test
 
 1. Check out this branch. Run `bun install`.
-2. Run `cd plugins/plugin-calendar && bunx vitest run --config vitest.config.ts test/calendar-ics-source.pglite.test.ts`.
+2. Run `cd plugins/plugin-inbox && bunx vitest run --config ./vitest.config.ts test/inbox.real-db.test.ts`.
    All tests must pass.
-3. Revert only `src/ics/fetch.ts` to `develop` and run the command again. The
-   test "reads a feed whose line fold is inside a UTF-8 character" must fail.
-4. Read the note in RFC 5545 section 3.1 about a fold in the middle of a UTF-8
-   multi-octet sequence.
+3. Revert only `src/inbox/unsubscribe-service.ts` to `develop` and run the
+   command again. The test "sends the mailto unsubscribe fields as RFC 6068
+   defines them" must fail.
+4. Read RFC 6068 section 2 (the grammar and the sentence about `hfname`) and
+   section 5 (the paragraph about `+`).
 
 - [x] Targets `develop` and has no conflicts with the latest `origin/develop`.
 - [ ] Ran `bun install` and `bun run verify` after syncing; record blockers below.
-- [x] Updated relevant documentation. `N/A - the code comment of the new function is the only text that describes this step`
+- [x] Updated relevant documentation. `N/A - a code comment at the changed lines is the only text that describes this parse`
 
 # Evidence Gate
 
 Evidence must match the reviewed commit. `packages/scripts/pr-evidence.ts rows`
 sets the marker from the live PR head; rerun after each push.
-<!-- evidence-head:7ff26edd52aa8ef537183163556423cb8f15291a -->
+<!-- evidence-head:684a65ec88f84bf1540da702b574360b252d2d35 -->
 
 <!-- evidence-row:before-screenshots -->
-- [x] Before screenshots: `N/A - backend calendar change, no UI code changes`.
+- [x] Before screenshots: `N/A - backend inbox change, no UI code changes`.
 <!-- evidence-row:after-screenshots -->
-- [x] After screenshots: `N/A - backend calendar change, no UI code changes`.
+- [x] After screenshots: `N/A - backend inbox change, no UI code changes`.
 <!-- evidence-row:walkthrough-video -->
 - [x] Walkthrough video: `N/A - this PR has no UI change`.
 <!-- evidence-row:backend-logs -->
 - [x] Backend logs show the real code path firing end to end. The script
-      synchronized each feed into a real PGlite database through
-      `CalendarService` and printed what `getCalendarFeed` returned.
+      called the real `InboxUnsubscribeService` on a real PGlite database and
+      printed the email that the service gave to the Gmail gateway.
 
 <details>
-<summary>Feed synchronization through CalendarService, before and after</summary>
+<summary>Unsubscribe requests through InboxUnsubscribeService, before and after</summary>
 
-Before, base `4da33e0cd1`:
-
-```
-Feed folded at 75 octets (folds inside characters)
-  body: 780 octets, folds inside a character: 3
-  synchronization: threw ICS_FEED_INVALID_UTF8: Calendar feed body is not valid UTF-8.
-  events in the feed: 0
-    not stored: AA Jahresabschlussgespräch der Geschäftsführung: Prüfung der Bücher für Köln, Düsseldorf und München
-    not stored: 분기 실적 검토 회의와 다음 분기 계획 수립을 위한 전체 팀 워크숍 및 저녁 식사 모임 안내
-    not stored: Offsite kickoff with dinner and a walk on the beach, last session🎉🎉 see you there
-
-Control, the same feed folded between characters
-  body: 777 octets, folds inside a character: 0
-  synchronization: outcome=complete source status=fresh error=none
-  events in the feed: 3
-    stored with the exact title: AA Jahresabschlussgespräch der Geschäftsführung: Prüfung der Bücher für Köln, Düsseldorf und München
-    stored with the exact title: 분기 실적 검토 회의와 다음 분기 계획 수립을 위한 전체 팀 워크숍 및 저녁 식사 모임 안내
-    stored with the exact title: Offsite kickoff with dinner and a walk on the beach, last session🎉🎉 see you there
-
-Control, a body that is not UTF-8 (one octet 0xFF in a title)
-  body: 777 octets, folds inside a character: 0
-  synchronization: threw ICS_FEED_INVALID_UTF8: Calendar feed body is not valid UTF-8.
-  events in the feed: 0
-    not stored: AA Jahresabschlussgespräch der Geschäftsführung: Prüfung der Bücher für Köln, Düsseldorf und München
-    not stored: 분기 실적 검토 회의와 다음 분기 계획 수립을 위한 전체 팀 워크숍 및 저녁 식사 모임 안내
-    not stored: Offsite kickoff with dinner and a walk on the beach, last session🎉🎉 see you there
-```
-
-After, commit `7ff26edd52aa8ef537183163556423cb8f15291a`:
+Before, base `6b83a01fcf`:
 
 ```
-Feed folded at 75 octets (folds inside characters)
-  body: 780 octets, folds inside a character: 3
-  synchronization: outcome=complete source status=fresh error=none
-  events in the feed: 3
-    stored with the exact title: AA Jahresabschlussgespräch der Geschäftsführung: Prüfung der Bücher für Köln, Düsseldorf und München
-    stored with the exact title: 분기 실적 검토 회의와 다음 분기 계획 수립을 위한 전체 팀 워크숍 및 저녁 식사 모임 안내
-    stored with the exact title: Offsite kickoff with dinner and a walk on the beach, last session🎉🎉 see you there
+A token with '+' in the subject
+  List-Unsubscribe: <mailto:unsubscribe@lists.example.com?subject=unsubscribe%20a1B2+c3D4/e5==>
+  record: method=mailto status=succeeded
+  expected email: {"recipient":"unsubscribe@lists.example.com","subject":"unsubscribe a1B2+c3D4/e5==","body":null}
+  email sent:     {"recipient":"unsubscribe@lists.example.com","subject":"unsubscribe a1B2 c3D4/e5==","body":null}
+  agrees: no
 
-Control, the same feed folded between characters
-  body: 777 octets, folds inside a character: 0
-  synchronization: outcome=complete source status=fresh error=none
-  events in the feed: 3
-    stored with the exact title: AA Jahresabschlussgespräch der Geschäftsführung: Prüfung der Bücher für Köln, Düsseldorf und München
-    stored with the exact title: 분기 실적 검토 회의와 다음 분기 계획 수립을 위한 전체 팀 워크숍 및 저녁 식사 모임 안내
-    stored with the exact title: Offsite kickoff with dinner and a walk on the beach, last session🎉🎉 see you there
+A token with '+' in the body
+  List-Unsubscribe: <mailto:leave@lists.example.com?subject=leave&body=token%3Aq9+Zx%2Fw>
+  record: method=mailto status=succeeded
+  expected email: {"recipient":"leave@lists.example.com","subject":"leave","body":"token:q9+Zx/w"}
+  email sent:     {"recipient":"leave@lists.example.com","subject":"leave","body":"token:q9 Zx/w"}
+  agrees: no
 
-Control, a body that is not UTF-8 (one octet 0xFF in a title)
-  body: 777 octets, folds inside a character: 0
-  synchronization: threw ICS_FEED_INVALID_UTF8: Calendar feed body is not valid UTF-8.
-  events in the feed: 0
-    not stored: AA Jahresabschlussgespräch der Geschäftsführung: Prüfung der Bücher für Köln, Düsseldorf und München
-    not stored: 분기 실적 검토 회의와 다음 분기 계획 수립을 위한 전체 팀 워크숍 및 저녁 식사 모임 안내
-    not stored: Offsite kickoff with dinner and a walk on the beach, last session🎉🎉 see you there
+Field names with capital letters
+  List-Unsubscribe: <mailto:requests@lists.example.com?Subject=unsubscribe%20list-42&Body=stop>
+  record: method=mailto status=succeeded
+  expected email: {"recipient":"requests@lists.example.com","subject":"unsubscribe list-42","body":"stop"}
+  email sent:     {"recipient":"requests@lists.example.com","subject":null,"body":null}
+  agrees: no
+
+Control, '+' written as %2B
+  List-Unsubscribe: <mailto:unsubscribe@lists.example.com?subject=unsubscribe%20a1B2%2Bc3D4>
+  record: method=mailto status=succeeded
+  expected email: {"recipient":"unsubscribe@lists.example.com","subject":"unsubscribe a1B2+c3D4","body":null}
+  email sent:     {"recipient":"unsubscribe@lists.example.com","subject":"unsubscribe a1B2+c3D4","body":null}
+  agrees: yes
+
+Control, '+' in the address
+  List-Unsubscribe: <mailto:unsub+a1b2c3@lists.example.com?subject=unsubscribe>
+  record: method=mailto status=succeeded
+  expected email: {"recipient":"unsub+a1b2c3@lists.example.com","subject":"unsubscribe","body":null}
+  email sent:     {"recipient":"unsub+a1b2c3@lists.example.com","subject":"unsubscribe","body":null}
+  agrees: yes
+```
+
+After, commit `684a65ec88f84bf1540da702b574360b252d2d35`:
+
+```
+A token with '+' in the subject
+  List-Unsubscribe: <mailto:unsubscribe@lists.example.com?subject=unsubscribe%20a1B2+c3D4/e5==>
+  record: method=mailto status=succeeded
+  expected email: {"recipient":"unsubscribe@lists.example.com","subject":"unsubscribe a1B2+c3D4/e5==","body":null}
+  email sent:     {"recipient":"unsubscribe@lists.example.com","subject":"unsubscribe a1B2+c3D4/e5==","body":null}
+  agrees: yes
+
+A token with '+' in the body
+  List-Unsubscribe: <mailto:leave@lists.example.com?subject=leave&body=token%3Aq9+Zx%2Fw>
+  record: method=mailto status=succeeded
+  expected email: {"recipient":"leave@lists.example.com","subject":"leave","body":"token:q9+Zx/w"}
+  email sent:     {"recipient":"leave@lists.example.com","subject":"leave","body":"token:q9+Zx/w"}
+  agrees: yes
+
+Field names with capital letters
+  List-Unsubscribe: <mailto:requests@lists.example.com?Subject=unsubscribe%20list-42&Body=stop>
+  record: method=mailto status=succeeded
+  expected email: {"recipient":"requests@lists.example.com","subject":"unsubscribe list-42","body":"stop"}
+  email sent:     {"recipient":"requests@lists.example.com","subject":"unsubscribe list-42","body":"stop"}
+  agrees: yes
+
+Control, '+' written as %2B
+  List-Unsubscribe: <mailto:unsubscribe@lists.example.com?subject=unsubscribe%20a1B2%2Bc3D4>
+  record: method=mailto status=succeeded
+  expected email: {"recipient":"unsubscribe@lists.example.com","subject":"unsubscribe a1B2+c3D4","body":null}
+  email sent:     {"recipient":"unsubscribe@lists.example.com","subject":"unsubscribe a1B2+c3D4","body":null}
+  agrees: yes
+
+Control, '+' in the address
+  List-Unsubscribe: <mailto:unsub+a1b2c3@lists.example.com?subject=unsubscribe>
+  record: method=mailto status=succeeded
+  expected email: {"recipient":"unsub+a1b2c3@lists.example.com","subject":"unsubscribe","body":null}
+  email sent:     {"recipient":"unsub+a1b2c3@lists.example.com","subject":"unsubscribe","body":null}
+  agrees: yes
 ```
 
 </details>
@@ -223,47 +245,45 @@ Control, a body that is not UTF-8 (one octet 0xFF in a title)
 <!-- evidence-row:llm-trajectory -->
 - [x] Real-LLM trajectory: `N/A - no agent, action, provider, prompt, or model change`.
 <!-- evidence-row:domain-artifacts -->
-- [x] Domain artifacts: `N/A - the feed titles and the stored events are in the backend log row; no other artifact applies`.
+- [x] Domain artifacts: `N/A - the email fields and the stored record are in the backend log row; no other artifact applies`.
 <!-- evidence-row:ocr-review -->
-- [x] OCR review: `N/A - backend calendar change has no rendered visual surface`.
+- [x] OCR review: `N/A - backend inbox change has no rendered visual surface`.
 
 # Evidence Details
 
-The replay script is not in this PR. It does these steps for each feed:
+The replay script is not in this PR. It does these steps for each
+`List-Unsubscribe` value:
 
-1. Create `CalendarService` on a real PGlite database with the production
-   calendar schema, as `calendar-ics-source.pglite.test.ts` does.
-2. Make the feed body as octets. The first feed uses a function that cuts
-   each line at 75 octets and then at each 74 octets, and puts `CR LF SP` at
-   each cut. The function counts the cuts that are inside a character.
-3. Create an ICS source and synchronize it with that body.
-4. Print the result of the synchronization or its error code.
-5. Read the feed with `getCalendarFeed` and print, for each title, if an
-   event with the exact title is stored.
+1. Create a real runtime with a PGlite database and the inbox schema, as
+   `inbox.real-db.test.ts` does.
+2. Make a Gmail gateway double that returns one newsletter message with the
+   `List-Unsubscribe` header, and that records the argument of
+   `sendMailtoUnsubscribeEmail`.
+3. Call `unsubscribeEmailSender` of the real `InboxUnsubscribeService`.
+4. Print the method and the status of the stored record, the expected email,
+   and the email that the gateway got, and print if the two are equal.
 
 ## Known gaps / failures
 
 - **`bun run verify` cannot complete on my machine (2 CPUs, 8 GB memory).**
   I ran each of the 22 scripts in `verify` alone, and each passed. For the step
   `turbo run typecheck lint:check`, I ran `typecheck` and `lint:check` for
-  `@elizaos/plugin-calendar` only, and both passed. On the full run for my
+  `@elizaos/plugin-inbox` only, and both passed. On the full run for my
   earlier PR #35316, the operating system stopped nine large packages for
   memory, and `@elizaos/capacitor-notification-mirror` needs an Android SDK
   that my machine does not have. This PR changes files in
-  `plugins/plugin-calendar` only.
-- **I did not use a feed from a third-party product.** I made the feed body
-  with a function that folds at octets. The RFC note and the two bug reports
-  are my evidence that such feeds exist.
-- **The fetch keeps the full body in memory before the decode.** The limit is
-  5 MB, the same limit as before.
-- **A fold after a fold inside one character is not repaired.** Example: a
-  lead octet, a fold, one continuation octet, a second fold. A producer that
-  folds at 75 octets cannot write this, because its lines are longer than one
-  character.
+  `plugins/plugin-inbox` only.
+- **I did not send an email through Gmail.** The gateway is a double. The
+  evidence is the argument that the real service gives to the gateway.
+- **I did not use a header from a real newsletter.** I wrote the header
+  values with the forms that RFC 6068 permits.
+- **A producer that writes a space as `+` now gets a `+` in the email.**
+  RFC 6068 section 5 says that this form cannot be told from a real `+`. The
+  RFC form for a space is `%20`, and it is read as before.
 
 ## Deployment
 
-None. The next synchronization of such a feed stores its events.
+None. The next unsubscribe request by email sends the correct fields.
 
 AI provider/model: anthropic / claude-opus-5-5
 Client / agent tooling: claude-code
