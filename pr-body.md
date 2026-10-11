@@ -2,156 +2,152 @@
 
 No issue. Only a person can create an issue in this repository, and no person
 has created one for this defect. I did not find the PRD or the MVP plan in the
-repository, so I cannot link a section. It corrects the expansion of a daily
-series in the calendar code that is already in `plugins/plugin-calendar`.
+repository, so I cannot link a section. This PR adds no feature. It corrects
+how the availability check that is already in `plugins/plugin-calendar` reads
+an event of a subscribed calendar.
 
 # Change
 
-A subscribed calendar (ICS feed) showed only the first event of a daily
-series when the rule listed weekdays.
+The assistant reported a conflict with an event that the calendar marks as
+free time, when the event came from a subscribed calendar (ICS feed).
 
-A daily rule can list weekdays with `BYDAY`. The rule
-`FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR` is "every weekday": each day from Monday
-to Friday, and no event on Saturday and Sunday. The Zimbra web client makes
-this rule when the user selects "every weekday".
+An ICS event can have the property `TRANSP:TRANSPARENT`. RFC 5545 section
+3.8.2.7 says that such an event does not use time: the time stays free.
+Examples are a public holiday, a birthday, and a reminder. Holiday calendars
+mark their events in this way.
 
-The local expansion did not support `BYDAY` for a `DAILY` rule. It put such a
-rule outside its supported set. Thus the feed kept only the first event of
-the series, and the feed state was `partial`. A daily meeting on work days
-was in the calendar one time only.
+The availability check already skips a free event. It reads the mark from
+the event metadata key `transparency`. The Google, Microsoft, and Apple
+sources write that key. The ICS source writes the mark under a different key,
+`icsTransparency`, and no code read that key. Thus the check did not know that
+an ICS event is free:
 
-Before (base `0eaad0ee2f`):
+- A free timed event (a reminder) was a hard conflict.
+- A free all-day event (a public holiday) was a warning for each new event on
+  that day.
+
+This PR makes the availability check read the key of the ICS source too.
+
+Before (base `8cc476cbb3`):
 
 ```
-feed state: partial
+Events of the subscribed feed (2026-07-01, UTC):
+  Public holiday (all day, TRANSP:TRANSPARENT)
+  Lunch reminder (10:00-11:00, TRANSP:TRANSPARENT)
+  School pickup (14:00-15:00, TRANSP:OPAQUE)
+  Dentist (16:00-17:00, no TRANSP)
 
-Every weekday for 8 occurrences (the Zimbra form)
-  DTSTART;TZID=America/New_York:19970902T090000
-  RRULE:FREQ=DAILY;INTERVAL=1;BYDAY=MO,TU,WE,TH,FR;COUNT=8
-  expected: Sep 2, 1997; Sep 3, 1997; Sep 4, 1997; Sep 5, 1997; Sep 8, 1997; Sep 9, 1997; Sep 10, 1997; Sep 11, 1997
-  feed result (1): Sep 2, 1997
-  agrees: no
+New event 10:15-10:45 (at the time of the free reminder)
+  definitive: true
+  conflicts (2): Lunch reminder (10:00-11:00, TRANSP:TRANSPARENT) | Public holiday (all day, TRANSP:TRANSPARENT)
+  summary: 1 hard conflict(s) and 1 warning(s) detected.
+New event 12:00-12:30 (only the holiday is at this time)
+  definitive: true
+  conflicts (1): Public holiday (all day, TRANSP:TRANSPARENT)
+  summary: 1 warning(s) detected.
 ```
 
 After (this PR):
 
 ```
-feed state: complete
+Events of the subscribed feed (2026-07-01, UTC):
+  Public holiday (all day, TRANSP:TRANSPARENT)
+  Lunch reminder (10:00-11:00, TRANSP:TRANSPARENT)
+  School pickup (14:00-15:00, TRANSP:OPAQUE)
+  Dentist (16:00-17:00, no TRANSP)
 
-Every weekday for 8 occurrences (the Zimbra form)
-  DTSTART;TZID=America/New_York:19970902T090000
-  RRULE:FREQ=DAILY;INTERVAL=1;BYDAY=MO,TU,WE,TH,FR;COUNT=8
-  expected: Sep 2, 1997; Sep 3, 1997; Sep 4, 1997; Sep 5, 1997; Sep 8, 1997; Sep 9, 1997; Sep 10, 1997; Sep 11, 1997
-  feed result (8): Sep 2, 1997; Sep 3, 1997; Sep 4, 1997; Sep 5, 1997; Sep 8, 1997; Sep 9, 1997; Sep 10, 1997; Sep 11, 1997
-  agrees: yes
+New event 10:15-10:45 (at the time of the free reminder)
+  definitive: true
+  conflicts (0): none
+  summary: No conflicts detected.
+New event 12:00-12:30 (only the holiday is at this time)
+  definitive: true
+  conflicts (0): none
+  summary: No conflicts detected.
 ```
 
-The backend log row has all five series.
+The backend log row has all four checks.
 
 # Why this implementation
 
-This PR adds one rule form to the set that the expansion of a subscribed
-calendar supports. I say this here because it is important for the review. I
-think that it is a correction and not a feature, for these reasons:
-
-- The owner sees a defect: a meeting on each work day is in the calendar one
-  time only.
-- RFC 5545 defines the result, and a real product writes the form.
-- The expansion already has the loop for the days of a `DAILY` rule. This PR
-  adds one condition to that loop.
-
 Sources that I used:
 
-- RFC 5545 section 3.8.5.3 (https://www.rfc-editor.org/rfc/rfc5545#section-3.8.5.3).
-  The table of the rule parts says "Limit" for `BYDAY` in a `DAILY` rule. Thus
-  the rule keeps only the days that are on the listed weekdays.
-- The Zimbra web client file `ZmRecurrence.js`
-  (https://github.com/Zimbra/zm-web-client/blob/develop/WebRoot/js/zimbraMail/calendar/model/ZmRecurrence.js).
-  Lines 131 to 146 make the rule for a daily series with "every weekday": the
-  frequency is daily, and `byday` gets each day of the week but `SA` and `SU`.
-  The comment of the field `repeatWeekday` says: "set to true if freq = "DAI"
-  and custom repeats every weekday".
-- RFC 5545 has no example with dates for this form. I calculated the expected
-  dates with the Python library `dateutil`, which is a different
-  implementation of RFC 5545.
+- RFC 5545 section 3.8.2.7, Time Transparency
+  (https://www.rfc-editor.org/rfc/rfc5545#section-3.8.2.7). `TRANSPARENT`
+  means that the event is not seen by a search for busy time.
+- The code of this repository:
+  - `src/ics/parser.ts` reads `TRANSP` and gives `transparent` or `opaque`.
+  - `src/ics/source.ts` stores that value as `metadata.icsTransparency`.
+  - `src/actions/conflict-detect.ts` (`calendarEventForAvailability`) reads
+    only `metadata.transparency`.
+  - `src/service/availability.ts` skips an event whose transparency is
+    `transparent` or `free`.
+  - The Google, Microsoft, and Apple sources write `metadata.transparency`.
+  - A search of the repository finds no other use of `icsTransparency`.
 
 Decisions:
 
-- **Only the feed expansion uses the new form.** `parseRecurrenceRule` and
-  `firstRecurrenceRule` get the option `dailyByDay`, next to the options of
-  PR #35449, #35468, #35489, and #35628. Only `ics/source.ts` sets it. Without
-  the option, the parser gives the same result as before. Thus the rule check
-  for event creation, the check for a "this and following" change of a
-  series, and the reply text do not change. The transcript is in the backend
-  log row.
-- **`INTERVAL` counts all days, and `BYDAY` then removes days.** This is the
-  order of RFC 5545. Example: `FREQ=DAILY;INTERVAL=2;BYDAY=MO,WE,FR` from a
-  Monday gives Monday, Wednesday, and Friday of each second week. The replay
-  has this case.
-- **`COUNT` counts the days that stay**, as the RFC says.
-- **A weekday with a number (`2MO`) in a `DAILY` rule stays outside the
-  supported set.** RFC 5545 does not permit it.
-- **`BYMONTH` and `BYMONTHDAY` in a `DAILY` rule stay outside the supported
-  set.** I found no product that writes them.
+- **The change is in the reader.** `calendarEventForAvailability` now reads
+  `transparency` first and `icsTransparency` second. It is the only function
+  that reads the transparency of a stored event.
+- **I did not change the key that the ICS source writes.** The ICS source
+  has the prefix `ics` on each of its metadata keys (`icsUid`, `icsSequence`,
+  `icsClassification`). The events that are already in the database have
+  `icsTransparency`. A change of the written key corrects only the events
+  that a later synchronization writes again. A change of the reader corrects
+  all the stored events immediately.
 
 Alternatives that I examined:
 
-- Change the rule into `FREQ=WEEKLY` with the same weekdays. I did not do
-  this. It is correct only for `INTERVAL=1`. With `INTERVAL=2`, the daily rule
-  counts days and the weekly rule counts weeks.
-- Support the form in all callers. I did not do this, for the same reasons as
-  in PR #35468: the series split check and the reply text each need more
-  code, and I cannot test the series split against a calendar provider.
+- Write `transparency` in the ICS source, in place of `icsTransparency` or
+  in addition to it. I did not do this, for the reason above. It also puts
+  one value under two keys.
 
 # Testing
 
-All commands ran on the tree of commit `d8d94236c76a6383931c91443f238667feedceb7`
+All commands ran on the tree of commit `cc2ed2d4a913339223a559f5a1feb55781e3683e`
 with Bun 1.4.2 and Node 24.15.0 on Linux x64.
 
 - **Real service path, before and after.** A script used the same setup as
   `calendar-ics-source.pglite.test.ts`: the real `CalendarService`, the real
   PGlite tables from the production schema, and a feed body given through the
   transport parameter of `syncIcsCalendarSource`. It stored a feed that has
-  five series and read it with `getCalendarFeed`. It compared each feed
-  result with the dates from `dateutil`. Two series are controls: a daily
-  rule without `BYDAY`, and a weekly rule with the same weekdays. Their
-  results are the same before and after. Results are in **Change** and in the
-  backend log row.
-- **Other callers, before and after.** A second script called
-  `normalizeRecurrence`, `describeRecurrence`, and `firstRecurrenceRule`
-  without the option. The output is the same before and after. It is in the
-  backend log row.
+  four events. Then it called `evaluateCalendarWriteAvailability` four times.
+  This is the function that the calendar action calls before it creates an
+  event. Results are in **Change** and in the backend log row. Two events are
+  controls: an event with `TRANSP:OPAQUE` and an event with no `TRANSP`. Each
+  of them is a conflict before and after.
 - `bun run test` in `plugins/plugin-calendar`: 32 files passed, 2 skipped;
-  371 tests passed, 4 skipped.
+  372 tests passed, 4 skipped.
 - `bun run typecheck` in `plugins/plugin-calendar`: passed.
 - `bun run lint:check` in `plugins/plugin-calendar`: passed.
 - I added one test case to the existing file
-  `calendar-ics-source.pglite.test.ts`. It stores one "every weekday" series
-  through the real service and database and compares the feed with the
-  expected dates. It fails on the base commit (the feed state is `partial`)
-  and passes on this branch. I added no test file.
+  `calendar-ics-source.pglite.test.ts`. It stores a free event and a busy
+  event through the real service and database and calls
+  `evaluateCalendarWriteAvailability` for the two times. It fails on the base
+  commit (the free event is a conflict) and passes on this branch. I added no
+  test file.
 
 ## How to test
 
 1. Check out this branch. Run `bun install`.
 2. Run `cd plugins/plugin-calendar && bunx vitest run --config vitest.config.ts test/calendar-ics-source.pglite.test.ts`.
    All tests must pass.
-3. Revert only `src/internal/recurrence.ts` and `src/ics/source.ts` to
-   `develop` and run the command again. The test "expands a daily series that
-   lists weekdays" must fail.
-4. Look at a calendar of September 1997. September 2 is a Tuesday, and
-   September 6 and 7 are a Saturday and a Sunday. Compare with the dates in
-   the test.
+3. Revert only `src/actions/conflict-detect.ts` to `develop` and run the
+   command again. The test "does not report a free subscribed event as a
+   conflict" must fail.
+4. Search the repository for `icsTransparency`. On `develop`, the only result
+   is the line in `src/ics/source.ts` that writes it.
 
 - [x] Targets `develop` and has no conflicts with the latest `origin/develop`.
 - [ ] Ran `bun install` and `bun run verify` after syncing; record blockers below.
-- [ ] Updated relevant documentation. `N/A - the code comments are the only text that describes the supported rule forms; this PR updates them`
+- [x] Updated relevant documentation. `N/A - a code comment at the changed line is the only text that describes this key`
 
 # Evidence Gate
 
 Evidence must match the reviewed commit. `packages/scripts/pr-evidence.ts rows`
 sets the marker from the live PR head; rerun after each push.
-<!-- evidence-head:d8d94236c76a6383931c91443f238667feedceb7 -->
+<!-- evidence-head:cc2ed2d4a913339223a559f5a1feb55781e3683e -->
 
 <!-- evidence-row:before-screenshots -->
 - [x] Before screenshots: `N/A - backend calendar change, no UI code changes`.
@@ -162,109 +158,63 @@ sets the marker from the live PR head; rerun after each push.
 <!-- evidence-row:backend-logs -->
 - [x] Backend logs show the real code path firing end to end. The script
       stored the feed in a real PGlite database through `CalendarService` and
-      printed what `getCalendarFeed` returned.
+      printed what `evaluateCalendarWriteAvailability` returned.
 
 <details>
-<summary>Feed replay through CalendarService, and the other callers, before and after</summary>
+<summary>Availability check on a subscribed feed through CalendarService, before and after</summary>
 
-Feed replay before, base `0eaad0ee2f`:
-
-```
-feed state: partial
-
-Every weekday for 8 occurrences (the Zimbra form)
-  DTSTART;TZID=America/New_York:19970902T090000
-  RRULE:FREQ=DAILY;INTERVAL=1;BYDAY=MO,TU,WE,TH,FR;COUNT=8
-  expected: Sep 2, 1997; Sep 3, 1997; Sep 4, 1997; Sep 5, 1997; Sep 8, 1997; Sep 9, 1997; Sep 10, 1997; Sep 11, 1997
-  feed result (1): Sep 2, 1997
-  agrees: no
-
-Every weekday to September 12
-  DTSTART;TZID=America/New_York:19970902T090000
-  RRULE:FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR;UNTIL=19970912T130000Z
-  expected: Sep 2, 1997; Sep 3, 1997; Sep 4, 1997; Sep 5, 1997; Sep 8, 1997; Sep 9, 1997; Sep 10, 1997; Sep 11, 1997; Sep 12, 1997
-  feed result (1): Sep 2, 1997
-  agrees: no
-
-Every other day, on Monday, Wednesday, and Friday only
-  DTSTART;TZID=America/New_York:19970901T090000
-  RRULE:FREQ=DAILY;INTERVAL=2;BYDAY=MO,WE,FR;COUNT=5
-  expected: Sep 1, 1997; Sep 3, 1997; Sep 5, 1997; Sep 15, 1997; Sep 17, 1997
-  feed result (1): Sep 1, 1997
-  agrees: no
-
-Control, daily rule without BYDAY
-  DTSTART;TZID=America/New_York:19970902T090000
-  RRULE:FREQ=DAILY;COUNT=4
-  expected: Sep 2, 1997; Sep 3, 1997; Sep 4, 1997; Sep 5, 1997
-  feed result (4): Sep 2, 1997; Sep 3, 1997; Sep 4, 1997; Sep 5, 1997
-  agrees: yes
-
-Control, weekly rule with the same weekdays
-  DTSTART;TZID=America/New_York:19970902T090000
-  RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;COUNT=8
-  expected: Sep 2, 1997; Sep 3, 1997; Sep 4, 1997; Sep 5, 1997; Sep 8, 1997; Sep 9, 1997; Sep 10, 1997; Sep 11, 1997
-  feed result (8): Sep 2, 1997; Sep 3, 1997; Sep 4, 1997; Sep 5, 1997; Sep 8, 1997; Sep 9, 1997; Sep 10, 1997; Sep 11, 1997
-  agrees: yes
-```
-
-Feed replay after, commit `d8d94236c76a6383931c91443f238667feedceb7`:
+Before, base `8cc476cbb3`:
 
 ```
-feed state: complete
+Events of the subscribed feed (2026-07-01, UTC):
+  Public holiday (all day, TRANSP:TRANSPARENT)
+  Lunch reminder (10:00-11:00, TRANSP:TRANSPARENT)
+  School pickup (14:00-15:00, TRANSP:OPAQUE)
+  Dentist (16:00-17:00, no TRANSP)
 
-Every weekday for 8 occurrences (the Zimbra form)
-  DTSTART;TZID=America/New_York:19970902T090000
-  RRULE:FREQ=DAILY;INTERVAL=1;BYDAY=MO,TU,WE,TH,FR;COUNT=8
-  expected: Sep 2, 1997; Sep 3, 1997; Sep 4, 1997; Sep 5, 1997; Sep 8, 1997; Sep 9, 1997; Sep 10, 1997; Sep 11, 1997
-  feed result (8): Sep 2, 1997; Sep 3, 1997; Sep 4, 1997; Sep 5, 1997; Sep 8, 1997; Sep 9, 1997; Sep 10, 1997; Sep 11, 1997
-  agrees: yes
-
-Every weekday to September 12
-  DTSTART;TZID=America/New_York:19970902T090000
-  RRULE:FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR;UNTIL=19970912T130000Z
-  expected: Sep 2, 1997; Sep 3, 1997; Sep 4, 1997; Sep 5, 1997; Sep 8, 1997; Sep 9, 1997; Sep 10, 1997; Sep 11, 1997; Sep 12, 1997
-  feed result (9): Sep 2, 1997; Sep 3, 1997; Sep 4, 1997; Sep 5, 1997; Sep 8, 1997; Sep 9, 1997; Sep 10, 1997; Sep 11, 1997; Sep 12, 1997
-  agrees: yes
-
-Every other day, on Monday, Wednesday, and Friday only
-  DTSTART;TZID=America/New_York:19970901T090000
-  RRULE:FREQ=DAILY;INTERVAL=2;BYDAY=MO,WE,FR;COUNT=5
-  expected: Sep 1, 1997; Sep 3, 1997; Sep 5, 1997; Sep 15, 1997; Sep 17, 1997
-  feed result (5): Sep 1, 1997; Sep 3, 1997; Sep 5, 1997; Sep 15, 1997; Sep 17, 1997
-  agrees: yes
-
-Control, daily rule without BYDAY
-  DTSTART;TZID=America/New_York:19970902T090000
-  RRULE:FREQ=DAILY;COUNT=4
-  expected: Sep 2, 1997; Sep 3, 1997; Sep 4, 1997; Sep 5, 1997
-  feed result (4): Sep 2, 1997; Sep 3, 1997; Sep 4, 1997; Sep 5, 1997
-  agrees: yes
-
-Control, weekly rule with the same weekdays
-  DTSTART;TZID=America/New_York:19970902T090000
-  RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;COUNT=8
-  expected: Sep 2, 1997; Sep 3, 1997; Sep 4, 1997; Sep 5, 1997; Sep 8, 1997; Sep 9, 1997; Sep 10, 1997; Sep 11, 1997
-  feed result (8): Sep 2, 1997; Sep 3, 1997; Sep 4, 1997; Sep 5, 1997; Sep 8, 1997; Sep 9, 1997; Sep 10, 1997; Sep 11, 1997
-  agrees: yes
+New event 10:15-10:45 (at the time of the free reminder)
+  definitive: true
+  conflicts (2): Lunch reminder (10:00-11:00, TRANSP:TRANSPARENT) | Public holiday (all day, TRANSP:TRANSPARENT)
+  summary: 1 hard conflict(s) and 1 warning(s) detected.
+New event 12:00-12:30 (only the holiday is at this time)
+  definitive: true
+  conflicts (1): Public holiday (all day, TRANSP:TRANSPARENT)
+  summary: 1 warning(s) detected.
+New event 14:15-14:45 (at the time of the school pickup)
+  definitive: true
+  conflicts (2): Public holiday (all day, TRANSP:TRANSPARENT) | School pickup (14:00-15:00, TRANSP:OPAQUE)
+  summary: 1 hard conflict(s) and 1 warning(s) detected.
+New event 16:15-16:45 (at the time of the dentist)
+  definitive: true
+  conflicts (2): Dentist (16:00-17:00, no TRANSP) | Public holiday (all day, TRANSP:TRANSPARENT)
+  summary: 1 hard conflict(s) and 1 warning(s) detected.
 ```
 
-Other callers. The output is the same on base `0eaad0ee2f` and on commit
-`d8d94236c76a6383931c91443f238667feedceb7`:
+After, commit `cc2ed2d4a913339223a559f5a1feb55781e3683e`:
 
 ```
-RRULE:FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR
-  normalizeRecurrence: ["RRULE:FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR"]
-  describeRecurrence: "freq=daily;byday=mo,tu,we,th,fr"
-  firstRecurrenceRule (no option) outside the expansion subset: true
-RRULE:FREQ=DAILY
-  normalizeRecurrence: ["RRULE:FREQ=DAILY"]
-  describeRecurrence: "daily"
-  firstRecurrenceRule (no option) outside the expansion subset: false
-RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR
-  normalizeRecurrence: ["RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"]
-  describeRecurrence: "weekly on Monday, Tuesday, Wednesday, Thursday, Friday"
-  firstRecurrenceRule (no option) outside the expansion subset: false
+Events of the subscribed feed (2026-07-01, UTC):
+  Public holiday (all day, TRANSP:TRANSPARENT)
+  Lunch reminder (10:00-11:00, TRANSP:TRANSPARENT)
+  School pickup (14:00-15:00, TRANSP:OPAQUE)
+  Dentist (16:00-17:00, no TRANSP)
+
+New event 10:15-10:45 (at the time of the free reminder)
+  definitive: true
+  conflicts (0): none
+  summary: No conflicts detected.
+New event 12:00-12:30 (only the holiday is at this time)
+  definitive: true
+  conflicts (0): none
+  summary: No conflicts detected.
+New event 14:15-14:45 (at the time of the school pickup)
+  definitive: true
+  conflicts (1): School pickup (14:00-15:00, TRANSP:OPAQUE)
+  summary: 1 hard conflict(s) detected.
+New event 16:15-16:45 (at the time of the dentist)
+  definitive: true
+  conflicts (1): Dentist (16:00-17:00, no TRANSP)
+  summary: 1 hard conflict(s) detected.
 ```
 
 </details>
@@ -274,29 +224,27 @@ RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR
 <!-- evidence-row:llm-trajectory -->
 - [x] Real-LLM trajectory: `N/A - no agent, action, provider, prompt, or model change`.
 <!-- evidence-row:domain-artifacts -->
-- [x] Domain artifacts: `N/A - the feed body and the returned events are in the backend log row; no other artifact applies`.
+- [x] Domain artifacts: `N/A - the feed events and the check results are in the backend log row; no other artifact applies`.
 <!-- evidence-row:ocr-review -->
 - [x] OCR review: `N/A - backend calendar change has no rendered visual surface`.
 
 # Evidence Details
 
-The two scripts are not in this PR.
-
-The feed replay does these steps:
+The replay script is not in this PR. It does these steps:
 
 1. Create `CalendarService` on a real PGlite database with the production
    calendar schema, as `calendar-ics-source.pglite.test.ts` does.
-2. Create an ICS source and synchronize it with a feed body that has five
-   series. Each series starts in September 1997 in `America/New_York`.
-3. Read the feed from 1997-01-01 to 2004-01-01 with `getCalendarFeed`.
-4. Print the feed state and the day of each returned event in
-   `America/New_York`, next to the expected dates, and print if the two lists
-   are equal.
+2. Create an ICS source and synchronize it with a feed body that has four
+   events on 2026-07-01: a free all-day event, a free timed event, a busy
+   timed event, and a timed event with no `TRANSP`.
+3. Call `evaluateCalendarWriteAvailability` for four new events of 30 minutes.
+4. Print the titles of the conflicts and the summary text of each result.
 
-In the output, the line `expected:` has the dates from `dateutil`.
-
-The second script imports `recurrence.ts` and calls `normalizeRecurrence`,
-`describeRecurrence`, and `firstRecurrenceRule` with each rule.
+I ran the script with the environment variable `TZ=UTC`. An all-day event of
+a feed is on the local day of the owner, so its hours in UTC change with the
+time zone of the machine. With `TZ=UTC`, the holiday is from 00:00 to 24:00
+UTC. The test case in this PR uses timed events only, so it does not depend
+on the time zone of the machine.
 
 ## Known gaps / failures
 
@@ -308,17 +256,17 @@ The second script imports `recurrence.ts` and calls `normalizeRecurrence`,
   memory, and `@elizaos/capacitor-notification-mirror` needs an Android SDK
   that my machine does not have. This PR changes files in
   `plugins/plugin-calendar` only.
-- **I did not use a feed from Zimbra.** I wrote the feed body. The Zimbra
-  source file is my evidence that a product makes this rule. I did not see
-  the text that the Zimbra server writes in a feed.
-- **The reply text for such an event stays the raw rule**
-  (`freq=daily;byday=mo,tu,we,th,fr`). I did not change `describeRecurrence`.
-- **`BYMONTH`, `BYMONTHDAY`, and a weekday with a number in a `DAILY` rule
-  stay outside the supported set.** The feed is `partial` for them, as before.
+- **I did not use a feed from a third-party product.** I wrote the feed body.
+- **I did not run the calendar action with a language model.** The script
+  calls the function that the action calls for the availability check.
+- **The free/busy read for a guest (`getCalendarFreeBusy`) is a different
+  path.** I did not examine how it uses transparency, and this PR does not
+  change it.
 
 ## Deployment
 
-None. The next read of a subscribed feed shows all the events of the series.
+None. The next availability check reads the stored events correctly. No
+synchronization is necessary.
 
 AI provider/model: anthropic / claude-opus-5-5
 Client / agent tooling: claude-code
