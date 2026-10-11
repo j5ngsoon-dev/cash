@@ -98,6 +98,15 @@ export function convertMarkdownToTelegram(markdown: string): string {
     return sentinel;
   }
   const SENTINEL_REPLACE = new RegExp(`${NUL_CHAR}(\\d+)${NUL_CHAR}`, "g");
+  // CommonMark 2.4: a backslash before an ASCII punctuation character makes
+  // that character literal. Storing the character keeps the backslash out of
+  // the message; left in the text, it was escaped again and Telegram showed it
+  // (`\$5` and `my\_file` instead of `$5` and `my_file`).
+  function protectBackslashEscapes(text: string): string {
+    return text.replace(/\\([!-/:-@[-`{-~])/g, (_match, literal) =>
+      storeReplacement(escapePlainText(literal)),
+    );
+  }
 
   // Sentinels are delimited by NUL, so a NUL arriving in the caller's text can
   // forge one: an in-range index splices that replacement into a position the
@@ -132,19 +141,17 @@ export function convertMarkdownToTelegram(markdown: string): string {
     /\[([^\]]+)\]\(((?:[^()\s]|\([^()]*\))+)\)/g,
     (_match, text, url) => {
       // For link text we escape as plain text.
-      const formattedText = escapePlainText(text);
+      const formattedText = escapePlainText(protectBackslashEscapes(text));
       const escapedURL = escapeUrl(url);
       const formatted = `[${formattedText}](${escapedURL})`;
       return storeReplacement(formatted);
     },
   );
 
-  // Protect escaped asterisks before interpreting emphasis. Consuming pairs
-  // of backslashes also preserves whether the next asterisk is escaped.
+  // Protect backslash escapes before interpreting emphasis. Consuming pairs
+  // of backslashes also preserves whether the next character is escaped.
   // Code and link destinations were already stored above and stay unchanged.
-  converted = converted.replace(/\\([\\*])/g, (_match, literal) =>
-    storeReplacement(escapePlainText(literal)),
-  );
+  converted = protectBackslashEscapes(converted);
 
   // 4. Bold text: standard markdown bold **text**
   //    Telegram bold is delimited by single asterisks: *text*

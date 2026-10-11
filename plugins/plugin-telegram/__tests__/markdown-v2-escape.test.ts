@@ -25,3 +25,34 @@ describe("convertMarkdownToTelegram mid-line '>'", () => {
     );
   });
 });
+
+describe("convertMarkdownToTelegram backslash escapes", () => {
+  it("sends the escaped character without the Markdown backslash", () => {
+    // CommonMark 2.4: a backslash before ASCII punctuation makes it literal.
+    expect(convertMarkdownToTelegram("The fee is \\$5 for my\\_file.")).toBe(
+      "The fee is $5 for my\\_file\\.",
+    );
+    expect(convertMarkdownToTelegram("1\\. not a list")).toBe(
+      "1\\. not a list",
+    );
+    expect(convertMarkdownToTelegram("\\# not a heading")).toBe(
+      "\\# not a heading",
+    );
+    expect(convertMarkdownToTelegram("\\_not italic\\_")).toBe(
+      "\\_not italic\\_",
+    );
+    expect(convertMarkdownToTelegram("[my\\_file](https://x.y)")).toBe(
+      "[my\\_file](https://x.y)",
+    );
+  });
+
+  it("keeps a backslash that is not a Markdown escape", () => {
+    expect(convertMarkdownToTelegram("C:\\Users\\name")).toBe(
+      "C:\\\\Users\\\\name",
+    );
+    expect(convertMarkdownToTelegram("`a\\_b`")).toBe("`a\\\\_b`");
+    expect(convertMarkdownToTelegram("path C:\\\\Users")).toBe(
+      "path C:\\\\Users",
+    );
+  });
+});
