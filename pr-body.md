@@ -154,11 +154,11 @@ sets the marker from the live PR head; rerun after each push.
 <!-- evidence-head:d8d94236c76a6383931c91443f238667feedceb7 -->
 
 <!-- evidence-row:before-screenshots -->
-- [ ] Before screenshots: `N/A - backend calendar change, no UI code changes`.
+- [x] Before screenshots: `N/A - backend calendar change, no UI code changes`.
 <!-- evidence-row:after-screenshots -->
-- [ ] After screenshots: `N/A - backend calendar change, no UI code changes`.
+- [x] After screenshots: `N/A - backend calendar change, no UI code changes`.
 <!-- evidence-row:walkthrough-video -->
-- [ ] Walkthrough video: `N/A - this PR has no UI change`.
+- [x] Walkthrough video: `N/A - this PR has no UI change`.
 <!-- evidence-row:backend-logs -->
 - [x] Backend logs show the real code path firing end to end. The script
       stored the feed in a real PGlite database through `CalendarService` and
@@ -270,13 +270,13 @@ RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR
 </details>
 
 <!-- evidence-row:frontend-logs -->
-- [ ] Frontend logs: `N/A - no frontend change`.
+- [x] Frontend logs: `N/A - no frontend change`.
 <!-- evidence-row:llm-trajectory -->
-- [ ] Real-LLM trajectory: `N/A - no agent, action, provider, prompt, or model change`.
+- [x] Real-LLM trajectory: `N/A - no agent, action, provider, prompt, or model change`.
 <!-- evidence-row:domain-artifacts -->
-- [ ] Domain artifacts: `N/A - the feed body and the returned events are in the backend log row; no other artifact applies`.
+- [x] Domain artifacts: `N/A - the feed body and the returned events are in the backend log row; no other artifact applies`.
 <!-- evidence-row:ocr-review -->
-- [ ] OCR review: `N/A - backend calendar change has no rendered visual surface`.
+- [x] OCR review: `N/A - backend calendar change has no rendered visual surface`.
 
 # Evidence Details
 
