@@ -3,151 +3,148 @@
 No issue. Only a person can create an issue in this repository, and no person
 has created one for this defect. I did not find the PRD or the MVP plan in the
 repository, so I cannot link a section. This PR adds no feature. It corrects
-how the availability check that is already in `plugins/plugin-calendar` reads
-an event of a subscribed calendar.
+how the feed fetch that is already in `plugins/plugin-calendar` decodes the
+body of a subscribed calendar.
 
 # Change
 
-The assistant reported a conflict with an event that the calendar marks as
-free time, when the event came from a subscribed calendar (ICS feed).
+The synchronization of a subscribed calendar (ICS feed) failed for the full
+feed when one line fold was inside a character that is not ASCII.
 
-An ICS event can have the property `TRANSP:TRANSPARENT`. RFC 5545 section
-3.8.2.7 says that such an event does not use time: the time stays free.
-Examples are a public holiday, a birthday, and a reminder. Holiday calendars
-mark their events in this way.
+An ICS file has long lines in parts: a line break and one space show that the
+line continues. This is a fold. RFC 5545 section 3.1 counts the length of a
+line in octets (bytes), not in characters. A character such as `ü`, `분`, or
+an emoji has 2 to 4 octets in UTF-8. Thus a producer that folds at 75 octets
+can put the fold between the octets of one character. The RFC has a note for
+this case: it says that simple implementations make such folds, and that a
+reader must unfold the lines in a way that gives the original octets again.
 
-The availability check already skips a free event. It reads the mark from
-the event metadata key `transparency`. The Google, Microsoft, and Apple
-sources write that key. The ICS source writes the mark under a different key,
-`icsTransparency`, and no code read that key. Thus the check did not know that
-an ICS event is free:
+The fetch decoded the body as UTF-8 first, and the parser removed the folds
+after that. A body with a fold inside a character is not valid UTF-8 before
+the folds are removed. Thus the fetch stopped with the error
+`ICS_FEED_INVALID_UTF8`, and no event of the feed was in the calendar. A feed
+with German, Korean, or emoji text in a long title can have this result.
 
-- A free timed event (a reminder) was a hard conflict.
-- A free all-day event (a public holiday) was a warning for each new event on
-  that day.
+This PR moves a fold that is inside a UTF-8 character to the end of that
+character before the body is decoded.
 
-This PR makes the availability check read the key of the ICS source too.
-
-Before (base `8cc476cbb3`):
+Before (base `4da33e0cd1`):
 
 ```
-Events of the subscribed feed (2026-07-01, UTC):
-  Public holiday (all day, TRANSP:TRANSPARENT)
-  Lunch reminder (10:00-11:00, TRANSP:TRANSPARENT)
-  School pickup (14:00-15:00, TRANSP:OPAQUE)
-  Dentist (16:00-17:00, no TRANSP)
-
-New event 10:15-10:45 (at the time of the free reminder)
-  definitive: true
-  conflicts (2): Lunch reminder (10:00-11:00, TRANSP:TRANSPARENT) | Public holiday (all day, TRANSP:TRANSPARENT)
-  summary: 1 hard conflict(s) and 1 warning(s) detected.
-New event 12:00-12:30 (only the holiday is at this time)
-  definitive: true
-  conflicts (1): Public holiday (all day, TRANSP:TRANSPARENT)
-  summary: 1 warning(s) detected.
+Feed folded at 75 octets (folds inside characters)
+  body: 780 octets, folds inside a character: 3
+  synchronization: threw ICS_FEED_INVALID_UTF8: Calendar feed body is not valid UTF-8.
+  events in the feed: 0
+    not stored: AA Jahresabschlussgespräch der Geschäftsführung: Prüfung der Bücher für Köln, Düsseldorf und München
+    not stored: 분기 실적 검토 회의와 다음 분기 계획 수립을 위한 전체 팀 워크숍 및 저녁 식사 모임 안내
+    not stored: Offsite kickoff with dinner and a walk on the beach, last session🎉🎉 see you there
 ```
 
 After (this PR):
 
 ```
-Events of the subscribed feed (2026-07-01, UTC):
-  Public holiday (all day, TRANSP:TRANSPARENT)
-  Lunch reminder (10:00-11:00, TRANSP:TRANSPARENT)
-  School pickup (14:00-15:00, TRANSP:OPAQUE)
-  Dentist (16:00-17:00, no TRANSP)
-
-New event 10:15-10:45 (at the time of the free reminder)
-  definitive: true
-  conflicts (0): none
-  summary: No conflicts detected.
-New event 12:00-12:30 (only the holiday is at this time)
-  definitive: true
-  conflicts (0): none
-  summary: No conflicts detected.
+Feed folded at 75 octets (folds inside characters)
+  body: 780 octets, folds inside a character: 3
+  synchronization: outcome=complete source status=fresh error=none
+  events in the feed: 3
+    stored with the exact title: AA Jahresabschlussgespräch der Geschäftsführung: Prüfung der Bücher für Köln, Düsseldorf und München
+    stored with the exact title: 분기 실적 검토 회의와 다음 분기 계획 수립을 위한 전체 팀 워크숍 및 저녁 식사 모임 안내
+    stored with the exact title: Offsite kickoff with dinner and a walk on the beach, last session🎉🎉 see you there
 ```
 
-The backend log row has all four checks.
+The backend log row has the two control feeds.
 
 # Why this implementation
 
 Sources that I used:
 
-- RFC 5545 section 3.8.2.7, Time Transparency
-  (https://www.rfc-editor.org/rfc/rfc5545#section-3.8.2.7). `TRANSPARENT`
-  means that the event is not seen by a search for busy time.
-- The code of this repository:
-  - `src/ics/parser.ts` reads `TRANSP` and gives `transparent` or `opaque`.
-  - `src/ics/source.ts` stores that value as `metadata.icsTransparency`.
-  - `src/actions/conflict-detect.ts` (`calendarEventForAvailability`) reads
-    only `metadata.transparency`.
-  - `src/service/availability.ts` skips an event whose transparency is
-    `transparent` or `free`.
-  - The Google, Microsoft, and Apple sources write `metadata.transparency`.
-  - A search of the repository finds no other use of `icsTransparency`.
+- RFC 5545 section 3.1, Content Lines
+  (https://www.rfc-editor.org/rfc/rfc5545#section-3.1). It gives the limit of
+  75 octets for a line, and it has the note about a fold in the middle of a
+  UTF-8 multi-octet sequence.
+- KDE bug 271859, "vCard logical lines folded in the middle of utf-8
+  character" (https://bugs.kde.org/show_bug.cgi?id=271859). KAddressBook
+  folded lines at the octet and cut Cyrillic characters. The correction is in
+  version 4.13. This is a vCard file, which has the same folding rule. It
+  shows that a product did write such folds.
+- SOGo bug 2298 (https://bugs.sogo.nu/view.php?id=2298). A user gave SOGo an
+  ICS file with a fold inside an umlaut, and SOGo refused the file. The
+  report says that SOGo decodes UTF-8 before it unfolds. This is the same
+  defect in a different product.
 
 Decisions:
 
-- **The change is in the reader.** `calendarEventForAvailability` now reads
-  `transparency` first and `icsTransparency` second. It is the only function
-  that reads the transparency of a stored event.
-- **I did not change the key that the ICS source writes.** The ICS source
-  has the prefix `ics` on each of its metadata keys (`icsUid`, `icsSequence`,
-  `icsClassification`). The events that are already in the database have
-  `icsTransparency`. A change of the written key corrects only the events
-  that a later synchronization writes again. A change of the reader corrects
-  all the stored events immediately.
+- **The fetch moves the fold. It does not remove it.** The octets
+  `C3 CR LF SP BC` become `C3 BC CR LF SP`. The decoded text is the same text
+  with the fold one character later. The parser then removes the fold as
+  before, and its limits for the number of lines and for the line length see
+  the same lines.
+- **The change is in the fetch**, because that is where the octets become
+  text. The parser gets a string and cannot repair the octets.
+- **The fetch now decodes the body one time, after it has read all of it.**
+  Before, it decoded each part of the stream. A fold can be between two parts
+  of the stream, so the repair needs the full body. The size limit of 5 MB
+  and its check during the read are the same as before.
+- **A body that is not UTF-8 is an error as before.** The repair moves octets
+  only when a fold is directly between the octets of one sequence and the
+  necessary continuation octets follow the fold. The replay has a control
+  with an octet `0xFF`.
 
 Alternatives that I examined:
 
-- Write `transparency` in the ICS source, in place of `icsTransparency` or
-  in addition to it. I did not do this, for the reason above. It also puts
-  one value under two keys.
+- Decode with replacement characters and not with an error. I did not do
+  this. It puts wrong characters in titles and hides a body that is not
+  UTF-8.
+- Remove all folds in the fetch before the decode. I did not do this. The
+  parser owns the unfold step and its limits, and two places with the same
+  step can disagree.
 
 # Testing
 
-All commands ran on the tree of commit `cc2ed2d4a913339223a559f5a1feb55781e3683e`
+All commands ran on the tree of commit `7ff26edd52aa8ef537183163556423cb8f15291a`
 with Bun 1.4.2 and Node 24.15.0 on Linux x64.
 
 - **Real service path, before and after.** A script used the same setup as
   `calendar-ics-source.pglite.test.ts`: the real `CalendarService`, the real
-  PGlite tables from the production schema, and a feed body given through the
-  transport parameter of `syncIcsCalendarSource`. It stored a feed that has
-  four events. Then it called `evaluateCalendarWriteAvailability` four times.
-  This is the function that the calendar action calls before it creates an
-  event. Results are in **Change** and in the backend log row. Two events are
-  controls: an event with `TRANSP:OPAQUE` and an event with no `TRANSP`. Each
-  of them is a conflict before and after.
+  PGlite tables from the production schema, and a feed body given as octets
+  through the transport parameter of `syncIcsCalendarSource`. It
+  synchronized three feeds and read each with `getCalendarFeed`:
+  1. A feed that is folded at 75 octets. Its three titles have a fold inside
+     a character of 2 octets (`ü`), of 3 octets (Korean), and of 4 octets
+     (emoji).
+  2. Control: the same feed folded between characters. It is correct before
+     and after.
+  3. Control: a body with the octet `0xFF`. It is an error before and after.
+  Results are in **Change** and in the backend log row.
 - `bun run test` in `plugins/plugin-calendar`: 32 files passed, 2 skipped;
-  372 tests passed, 4 skipped.
+  375 tests passed, 4 skipped.
 - `bun run typecheck` in `plugins/plugin-calendar`: passed.
 - `bun run lint:check` in `plugins/plugin-calendar`: passed.
 - I added one test case to the existing file
-  `calendar-ics-source.pglite.test.ts`. It stores a free event and a busy
-  event through the real service and database and calls
-  `evaluateCalendarWriteAvailability` for the two times. It fails on the base
-  commit (the free event is a conflict) and passes on this branch. I added no
-  test file.
+  `calendar-ics-source.pglite.test.ts`. It gives the real service a body in
+  which a fold is after the first octet of `ü`, and it compares the stored
+  title. It fails on the base commit (the synchronization throws) and passes
+  on this branch. I added no test file.
 
 ## How to test
 
 1. Check out this branch. Run `bun install`.
 2. Run `cd plugins/plugin-calendar && bunx vitest run --config vitest.config.ts test/calendar-ics-source.pglite.test.ts`.
    All tests must pass.
-3. Revert only `src/actions/conflict-detect.ts` to `develop` and run the
-   command again. The test "does not report a free subscribed event as a
-   conflict" must fail.
-4. Search the repository for `icsTransparency`. On `develop`, the only result
-   is the line in `src/ics/source.ts` that writes it.
+3. Revert only `src/ics/fetch.ts` to `develop` and run the command again. The
+   test "reads a feed whose line fold is inside a UTF-8 character" must fail.
+4. Read the note in RFC 5545 section 3.1 about a fold in the middle of a UTF-8
+   multi-octet sequence.
 
 - [x] Targets `develop` and has no conflicts with the latest `origin/develop`.
 - [ ] Ran `bun install` and `bun run verify` after syncing; record blockers below.
-- [x] Updated relevant documentation. `N/A - a code comment at the changed line is the only text that describes this key`
+- [x] Updated relevant documentation. `N/A - the code comment of the new function is the only text that describes this step`
 
 # Evidence Gate
 
 Evidence must match the reviewed commit. `packages/scripts/pr-evidence.ts rows`
 sets the marker from the live PR head; rerun after each push.
-<!-- evidence-head:cc2ed2d4a913339223a559f5a1feb55781e3683e -->
+<!-- evidence-head:7ff26edd52aa8ef537183163556423cb8f15291a -->
 
 <!-- evidence-row:before-screenshots -->
 - [x] Before screenshots: `N/A - backend calendar change, no UI code changes`.
@@ -157,64 +154,66 @@ sets the marker from the live PR head; rerun after each push.
 - [x] Walkthrough video: `N/A - this PR has no UI change`.
 <!-- evidence-row:backend-logs -->
 - [x] Backend logs show the real code path firing end to end. The script
-      stored the feed in a real PGlite database through `CalendarService` and
-      printed what `evaluateCalendarWriteAvailability` returned.
+      synchronized each feed into a real PGlite database through
+      `CalendarService` and printed what `getCalendarFeed` returned.
 
 <details>
-<summary>Availability check on a subscribed feed through CalendarService, before and after</summary>
+<summary>Feed synchronization through CalendarService, before and after</summary>
 
-Before, base `8cc476cbb3`:
-
-```
-Events of the subscribed feed (2026-07-01, UTC):
-  Public holiday (all day, TRANSP:TRANSPARENT)
-  Lunch reminder (10:00-11:00, TRANSP:TRANSPARENT)
-  School pickup (14:00-15:00, TRANSP:OPAQUE)
-  Dentist (16:00-17:00, no TRANSP)
-
-New event 10:15-10:45 (at the time of the free reminder)
-  definitive: true
-  conflicts (2): Lunch reminder (10:00-11:00, TRANSP:TRANSPARENT) | Public holiday (all day, TRANSP:TRANSPARENT)
-  summary: 1 hard conflict(s) and 1 warning(s) detected.
-New event 12:00-12:30 (only the holiday is at this time)
-  definitive: true
-  conflicts (1): Public holiday (all day, TRANSP:TRANSPARENT)
-  summary: 1 warning(s) detected.
-New event 14:15-14:45 (at the time of the school pickup)
-  definitive: true
-  conflicts (2): Public holiday (all day, TRANSP:TRANSPARENT) | School pickup (14:00-15:00, TRANSP:OPAQUE)
-  summary: 1 hard conflict(s) and 1 warning(s) detected.
-New event 16:15-16:45 (at the time of the dentist)
-  definitive: true
-  conflicts (2): Dentist (16:00-17:00, no TRANSP) | Public holiday (all day, TRANSP:TRANSPARENT)
-  summary: 1 hard conflict(s) and 1 warning(s) detected.
-```
-
-After, commit `cc2ed2d4a913339223a559f5a1feb55781e3683e`:
+Before, base `4da33e0cd1`:
 
 ```
-Events of the subscribed feed (2026-07-01, UTC):
-  Public holiday (all day, TRANSP:TRANSPARENT)
-  Lunch reminder (10:00-11:00, TRANSP:TRANSPARENT)
-  School pickup (14:00-15:00, TRANSP:OPAQUE)
-  Dentist (16:00-17:00, no TRANSP)
+Feed folded at 75 octets (folds inside characters)
+  body: 780 octets, folds inside a character: 3
+  synchronization: threw ICS_FEED_INVALID_UTF8: Calendar feed body is not valid UTF-8.
+  events in the feed: 0
+    not stored: AA Jahresabschlussgespräch der Geschäftsführung: Prüfung der Bücher für Köln, Düsseldorf und München
+    not stored: 분기 실적 검토 회의와 다음 분기 계획 수립을 위한 전체 팀 워크숍 및 저녁 식사 모임 안내
+    not stored: Offsite kickoff with dinner and a walk on the beach, last session🎉🎉 see you there
 
-New event 10:15-10:45 (at the time of the free reminder)
-  definitive: true
-  conflicts (0): none
-  summary: No conflicts detected.
-New event 12:00-12:30 (only the holiday is at this time)
-  definitive: true
-  conflicts (0): none
-  summary: No conflicts detected.
-New event 14:15-14:45 (at the time of the school pickup)
-  definitive: true
-  conflicts (1): School pickup (14:00-15:00, TRANSP:OPAQUE)
-  summary: 1 hard conflict(s) detected.
-New event 16:15-16:45 (at the time of the dentist)
-  definitive: true
-  conflicts (1): Dentist (16:00-17:00, no TRANSP)
-  summary: 1 hard conflict(s) detected.
+Control, the same feed folded between characters
+  body: 777 octets, folds inside a character: 0
+  synchronization: outcome=complete source status=fresh error=none
+  events in the feed: 3
+    stored with the exact title: AA Jahresabschlussgespräch der Geschäftsführung: Prüfung der Bücher für Köln, Düsseldorf und München
+    stored with the exact title: 분기 실적 검토 회의와 다음 분기 계획 수립을 위한 전체 팀 워크숍 및 저녁 식사 모임 안내
+    stored with the exact title: Offsite kickoff with dinner and a walk on the beach, last session🎉🎉 see you there
+
+Control, a body that is not UTF-8 (one octet 0xFF in a title)
+  body: 777 octets, folds inside a character: 0
+  synchronization: threw ICS_FEED_INVALID_UTF8: Calendar feed body is not valid UTF-8.
+  events in the feed: 0
+    not stored: AA Jahresabschlussgespräch der Geschäftsführung: Prüfung der Bücher für Köln, Düsseldorf und München
+    not stored: 분기 실적 검토 회의와 다음 분기 계획 수립을 위한 전체 팀 워크숍 및 저녁 식사 모임 안내
+    not stored: Offsite kickoff with dinner and a walk on the beach, last session🎉🎉 see you there
+```
+
+After, commit `7ff26edd52aa8ef537183163556423cb8f15291a`:
+
+```
+Feed folded at 75 octets (folds inside characters)
+  body: 780 octets, folds inside a character: 3
+  synchronization: outcome=complete source status=fresh error=none
+  events in the feed: 3
+    stored with the exact title: AA Jahresabschlussgespräch der Geschäftsführung: Prüfung der Bücher für Köln, Düsseldorf und München
+    stored with the exact title: 분기 실적 검토 회의와 다음 분기 계획 수립을 위한 전체 팀 워크숍 및 저녁 식사 모임 안내
+    stored with the exact title: Offsite kickoff with dinner and a walk on the beach, last session🎉🎉 see you there
+
+Control, the same feed folded between characters
+  body: 777 octets, folds inside a character: 0
+  synchronization: outcome=complete source status=fresh error=none
+  events in the feed: 3
+    stored with the exact title: AA Jahresabschlussgespräch der Geschäftsführung: Prüfung der Bücher für Köln, Düsseldorf und München
+    stored with the exact title: 분기 실적 검토 회의와 다음 분기 계획 수립을 위한 전체 팀 워크숍 및 저녁 식사 모임 안내
+    stored with the exact title: Offsite kickoff with dinner and a walk on the beach, last session🎉🎉 see you there
+
+Control, a body that is not UTF-8 (one octet 0xFF in a title)
+  body: 777 octets, folds inside a character: 0
+  synchronization: threw ICS_FEED_INVALID_UTF8: Calendar feed body is not valid UTF-8.
+  events in the feed: 0
+    not stored: AA Jahresabschlussgespräch der Geschäftsführung: Prüfung der Bücher für Köln, Düsseldorf und München
+    not stored: 분기 실적 검토 회의와 다음 분기 계획 수립을 위한 전체 팀 워크숍 및 저녁 식사 모임 안내
+    not stored: Offsite kickoff with dinner and a walk on the beach, last session🎉🎉 see you there
 ```
 
 </details>
@@ -224,27 +223,23 @@ New event 16:15-16:45 (at the time of the dentist)
 <!-- evidence-row:llm-trajectory -->
 - [x] Real-LLM trajectory: `N/A - no agent, action, provider, prompt, or model change`.
 <!-- evidence-row:domain-artifacts -->
-- [x] Domain artifacts: `N/A - the feed events and the check results are in the backend log row; no other artifact applies`.
+- [x] Domain artifacts: `N/A - the feed titles and the stored events are in the backend log row; no other artifact applies`.
 <!-- evidence-row:ocr-review -->
 - [x] OCR review: `N/A - backend calendar change has no rendered visual surface`.
 
 # Evidence Details
 
-The replay script is not in this PR. It does these steps:
+The replay script is not in this PR. It does these steps for each feed:
 
 1. Create `CalendarService` on a real PGlite database with the production
    calendar schema, as `calendar-ics-source.pglite.test.ts` does.
-2. Create an ICS source and synchronize it with a feed body that has four
-   events on 2026-07-01: a free all-day event, a free timed event, a busy
-   timed event, and a timed event with no `TRANSP`.
-3. Call `evaluateCalendarWriteAvailability` for four new events of 30 minutes.
-4. Print the titles of the conflicts and the summary text of each result.
-
-I ran the script with the environment variable `TZ=UTC`. An all-day event of
-a feed is on the local day of the owner, so its hours in UTC change with the
-time zone of the machine. With `TZ=UTC`, the holiday is from 00:00 to 24:00
-UTC. The test case in this PR uses timed events only, so it does not depend
-on the time zone of the machine.
+2. Make the feed body as octets. The first feed uses a function that cuts
+   each line at 75 octets and then at each 74 octets, and puts `CR LF SP` at
+   each cut. The function counts the cuts that are inside a character.
+3. Create an ICS source and synchronize it with that body.
+4. Print the result of the synchronization or its error code.
+5. Read the feed with `getCalendarFeed` and print, for each title, if an
+   event with the exact title is stored.
 
 ## Known gaps / failures
 
@@ -256,17 +251,19 @@ on the time zone of the machine.
   memory, and `@elizaos/capacitor-notification-mirror` needs an Android SDK
   that my machine does not have. This PR changes files in
   `plugins/plugin-calendar` only.
-- **I did not use a feed from a third-party product.** I wrote the feed body.
-- **I did not run the calendar action with a language model.** The script
-  calls the function that the action calls for the availability check.
-- **The free/busy read for a guest (`getCalendarFreeBusy`) is a different
-  path.** I did not examine how it uses transparency, and this PR does not
-  change it.
+- **I did not use a feed from a third-party product.** I made the feed body
+  with a function that folds at octets. The RFC note and the two bug reports
+  are my evidence that such feeds exist.
+- **The fetch keeps the full body in memory before the decode.** The limit is
+  5 MB, the same limit as before.
+- **A fold after a fold inside one character is not repaired.** Example: a
+  lead octet, a fold, one continuation octet, a second fold. A producer that
+  folds at 75 octets cannot write this, because its lines are longer than one
+  character.
 
 ## Deployment
 
-None. The next availability check reads the stored events correctly. No
-synchronization is necessary.
+None. The next synchronization of such a feed stores its events.
 
 AI provider/model: anthropic / claude-opus-5-5
 Client / agent tooling: claude-code
