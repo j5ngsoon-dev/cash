@@ -244,7 +244,7 @@ The replay script is not in this PR. It does these steps:
 - **I did not use a feed from Outlook or Exchange.** I wrote the feed body
   with the zone names of the CLDR file.
 - **The CLDR names are on the `main` branch.** The CLDR releases 47 and 48 do
-  not have them. I found no CLDR release that has them.
+  not have them. I did not examine other releases.
 - **The instants after 2026-11-01 depend on the time zone data of the
   runtime.** This PR gives the IANA id only. The offset of an id comes from
   the time zone data of Node or Bun.
